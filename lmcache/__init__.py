@@ -24,3 +24,6 @@ __all__ = [
 ]
 
 __version__ = "0.1.0"
+
+# Auto-initialize memory trace from environment variables
+initialize_memory_trace_from_env()

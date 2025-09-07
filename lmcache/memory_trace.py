@@ -392,7 +392,7 @@ def get_memory_trace_manager() -> MemoryTraceManager:
 
 def initialize_memory_trace_from_env():
     """Initialize memory trace from environment variables"""
-    enabled = os.getenv("LMC_TRACE_ENABLE", "false").lower() == "true"
+    enabled = os.getenv("LMC_TRACE_ENABLE", "true").lower() == "true"
     
     if not enabled:
         return
