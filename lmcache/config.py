@@ -73,6 +73,13 @@ class LMCacheEngineConfig:
     blend_add_special_in_precomp: bool
     # whether to add special tokens in pre-computations
 
+    # Memory trace configuration
+    trace_enable: bool = False
+    trace_output_dir: str = "./traces"
+    trace_rotate_max_bytes: int = 536870912  # 512MB
+    trace_rotate_interval_sec: int = 0
+    trace_include_fields: Optional[list] = None
+
     @staticmethod
     def from_defaults(
         chunk_size: int = 256,
@@ -87,6 +94,11 @@ class LMCacheEngineConfig:
         blend_min_tokens: int = 256,
         blend_separator: str = blend_default_separator,
         blend_add_special_in_precomp: bool = False,
+        trace_enable: bool = False,
+        trace_output_dir: str = "./traces",
+        trace_rotate_max_bytes: int = 536870912,
+        trace_rotate_interval_sec: int = 0,
+        trace_include_fields: Optional[list] = None,
     ) -> "LMCacheEngineConfig":
         return LMCacheEngineConfig(
             chunk_size,
@@ -101,6 +113,11 @@ class LMCacheEngineConfig:
             blend_min_tokens,
             blend_separator,
             blend_add_special_in_precomp,
+            trace_enable,
+            trace_output_dir,
+            trace_rotate_max_bytes,
+            trace_rotate_interval_sec,
+            trace_include_fields,
         )
 
     @staticmethod

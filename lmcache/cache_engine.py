@@ -10,6 +10,10 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineConfig, LMCacheEngineMetadata
 from lmcache.logging import init_logger
+from lmcache.memory_trace import (
+    get_memory_trace_manager,
+    initialize_memory_trace_from_env
+)
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.storage_backend import CreateStorageBackend
 from lmcache.usage_context import InitializeUsageContext
@@ -43,6 +47,53 @@ class LMCacheEngine:
 
         InitializeUsageContext(config, metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+        
+        # Initialize memory trace
+        self._init_memory_trace(config, metadata)
+        
+        # Initialize request tracking
+        self._current_request_id = None
+        self._current_seq_id = 0
+
+    def _init_memory_trace(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata
+    ):
+        """Initialize memory trace based on config or environment"""
+        # First try to initialize from environment variables
+        initialize_memory_trace_from_env()
+        
+        # If not enabled by env, check config
+        manager = get_memory_trace_manager()
+        if not manager.enabled and hasattr(config, 'trace_enable'):
+            rank_suffix = None
+            if metadata.world_size > 1:
+                rank_suffix = f"rank{metadata.worker_id}"
+            
+            manager.initialize(
+                enabled=config.trace_enable,
+                output_dir=getattr(config, 'trace_output_dir', './traces'),
+                rotate_max_bytes=getattr(
+                    config, 'trace_rotate_max_bytes', 536870912
+                ),
+                rotate_interval_sec=getattr(
+                    config, 'trace_rotate_interval_sec', 0
+                ),
+                include_fields=getattr(config, 'trace_include_fields', None),
+                rank_suffix=rank_suffix
+            )
+    
+    def set_request_context(
+        self,
+        request_id: Optional[str] = None,
+        seq_id: Optional[int] = None
+    ):
+        """Set the current request context for memory tracing"""
+        if request_id is not None:
+            self._current_request_id = request_id
+        if seq_id is not None:
+            self._current_seq_id = seq_id
 
     def _make_key(self, chunk_hash: int, fmt: str) -> CacheEngineKey:
         return CacheEngineKey(
@@ -323,14 +374,48 @@ class LMCacheEngine:
             chunk_hashes_and_kvs = list(chunk_hashes_and_kvs)
         end_make_chunks = time.perf_counter()
         """ store them into the dictionary """
+        trace_manager = get_memory_trace_manager()
+        chunk_list = []
+        
+        # Collect chunks for tracing
+        for chunk_hash, kv_chunk in chunk_hashes_and_kvs:
+            chunk_list.append((chunk_hash, kv_chunk))
+        
+        # Store chunks
         n_chunks = self.engine_.batched_put(
             (
                 (self._make_key(chunk_hash, fmt), kv_chunk)
-                for chunk_hash, kv_chunk in chunk_hashes_and_kvs
+                for chunk_hash, kv_chunk in chunk_list
             ),
             blocking=blocking,
         )
-
+        
+        # Record memory trace for offload events
+        if trace_manager.enabled:
+            for idx, (chunk_hash, kv_chunk) in enumerate(chunk_list):
+                chunk_size_bytes = (
+                    kv_chunk.element_size() * kv_chunk.nelement()
+                )
+                chunk_address = id(kv_chunk)  # Placeholder address
+                
+                trace_manager.record_kv_cache_offload(
+                    request_id=(self._current_request_id or
+                                f"req-{monitor_req_id}"),
+                    seq_id=self._current_seq_id + idx,
+                    address=chunk_address,
+                    size_bytes=chunk_size_bytes,
+                    chunk_size=self.chunk_size,
+                    kv_dtype=str(self.metadata.kv_dtype),
+                    layer_count=self.metadata.kv_shape[0],
+                    head_count=self.metadata.kv_shape[3],
+                    token_count=self.chunk_size,
+                    extra={
+                        "chunk_hash": chunk_hash,
+                        "fmt": fmt,
+                        "worker_id": self.metadata.worker_id,
+                        "reason": "store"
+                    }
+                )
         end_time = time.perf_counter()
         logger.info(
             f"Stored/updated {n_chunks} chunks, total time "
@@ -394,10 +479,42 @@ class LMCacheEngine:
         )
 
         retrieved_kv_chunks = []
-        for chunk in retrival_iterator:
+        trace_manager = get_memory_trace_manager()
+        
+        for chunk_idx, chunk in enumerate(retrival_iterator):
             if chunk is None:
                 break
             retrieved_kv_chunks.append(chunk)
+            
+            # Record memory trace for cache hit
+            if trace_manager.enabled and chunk is not None:
+                # Get chunk metadata
+                chunk_hash = chunk_hashes[chunk_idx]
+                chunk_size_bytes = chunk.element_size() * chunk.nelement()
+                
+                # Try to get address from chunk if available
+                # This is a placeholder - actual implementation depends on
+                # storage backend providing address information
+                chunk_address = id(chunk)  # Use object id as placeholder
+                
+                trace_manager.record_kv_cache_hit(
+                    request_id=(self._current_request_id or
+                                f"req-{monitor_req_id}"),
+                    seq_id=self._current_seq_id,
+                    address=chunk_address,
+                    size_bytes=chunk_size_bytes,
+                    chunk_size=self.chunk_size,
+                    kv_dtype=str(self.metadata.kv_dtype),
+                    layer_count=self.metadata.kv_shape[0],
+                    head_count=self.metadata.kv_shape[3],
+                    token_count=self.chunk_size,
+                    extra={
+                        "chunk_hash": chunk_hash,
+                        "fmt": fmt,
+                        "worker_id": self.metadata.worker_id
+                    }
+                )
+
         """ concatenate the kv cache """
         dim = None
         match fmt:
