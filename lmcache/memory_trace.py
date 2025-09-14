@@ -391,10 +391,18 @@ def get_memory_trace_manager() -> MemoryTraceManager:
 
 
 def initialize_memory_trace_from_env():
-    """Initialize memory trace from environment variables"""
-    enabled = os.getenv("LMC_TRACE_ENABLE", "true").lower() == "true"
+    """Initialize memory trace - FORCED DEFAULT ENABLED"""
+    # Force enable by default, only disable if explicitly set to false
+    enabled = os.getenv("LMC_TRACE_ENABLE", "true").lower() in (
+        "true", "1", "yes", "on"
+    )
+    
+    env_val = os.getenv('LMC_TRACE_ENABLE', 'NOT_SET')
+    print(f"[LMCache Memory Trace] Checking initialization: "
+          f"LMC_TRACE_ENABLE={env_val}, enabled={enabled}")
     
     if not enabled:
+        print("[LMCache Memory Trace] Memory tracing is disabled")
         return
     
     output_dir = os.getenv("LMC_TRACE_OUTPUT_DIR", "./traces")
@@ -427,6 +435,7 @@ def initialize_memory_trace_from_env():
         rank_suffix = "_".join(parts)
     
     manager = get_memory_trace_manager()
+    print(f"[LMCache Memory Trace] Initializing with output_dir={output_dir}")
     manager.initialize(
         enabled=enabled,
         output_dir=output_dir,
@@ -435,3 +444,11 @@ def initialize_memory_trace_from_env():
         include_fields=include_fields,
         rank_suffix=rank_suffix
     )
+    
+    # Confirm initialization
+    if manager.enabled:
+        print("[LMCache Memory Trace] Successfully initialized and enabled!")
+        print(f"[LMCache Memory Trace] Trace files will be written to: "
+              f"{output_dir}")
+    else:
+        print("[LMCache Memory Trace] Failed to initialize or disabled")
