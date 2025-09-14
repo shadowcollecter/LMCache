@@ -55,6 +55,9 @@ from lmcache.v1.token_database import (
     SegmentTokenDatabase,
     TokenDatabase,
 )
+from lmcache.memory_trace import (
+    get_memory_trace_manager,  # Memory trace instrumentation
+)
 
 logger = init_logger(__name__)
 
@@ -100,7 +103,9 @@ class LMCacheEngine:
         self.broadcast_object_fn = broadcast_object_fn
         # save_only_first_rank only works when use mla
         self.save_only_first_rank = (
-            self.config.get_extra_config_value("save_only_first_rank", metadata.use_mla)
+            self.config.get_extra_config_value(
+                "save_only_first_rank", metadata.use_mla
+            )
             and metadata.use_mla
         )
         self.enable_p2p = config.enable_p2p
@@ -190,9 +195,11 @@ class LMCacheEngine:
     ) -> None:
         """Store the tokens/hashes and mask into the cache engine.
 
-        :param Optional[torch.Tensor] tokens: The tokens of the corresponding KV caches.
+        :param Optional[torch.Tensor] tokens: The tokens of the corresponding
+            KV caches.
 
-        :param Optional[List[int]] hashes: The hashes of the corresponding KV caches.
+        :param Optional[List[int]] hashes: The hashes of the corresponding
+            KV caches.
 
         :param Optional[torch.Tensor] mask: The mask for the tokens. Should
             have the same length as tokens. And the mask should ALWAYS be like
@@ -228,7 +235,9 @@ class LMCacheEngine:
             "Either 'tokens' or 'hashes' must be provided."
         )
 
-        monitor_req_id = self.stats_monitor.on_store_request(num_to_store_tokens)
+        monitor_req_id = self.stats_monitor.on_store_request(
+            num_to_store_tokens
+        )
 
         starts = []
         ends = []
@@ -279,13 +288,17 @@ class LMCacheEngine:
         # memory_objs might be empty, directly return to avoid sending tokens
         if not memory_objs:
             return
-        self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
+        self.gpu_connector.batched_from_gpu(
+            memory_objs, starts, ends, **kwargs
+        )
         offload_time += time.perf_counter() - t
 
         t = time.perf_counter()
 
         transfer_spec = kwargs.get("transfer_spec", None)
-        self.storage_manager.batched_put(keys, memory_objs, transfer_spec=transfer_spec)
+        self.storage_manager.batched_put(
+            keys, memory_objs, transfer_spec=transfer_spec
+        )
         put_time += time.perf_counter() - t
 
         tot_time = offload_time + put_time
@@ -306,6 +319,37 @@ class LMCacheEngine:
         )
 
         self.stats_monitor.on_store_finished(monitor_req_id, tot_token_num)
+
+        # Memory trace: record offload events (aggregate)
+        try:  # Defensive: avoid impacting main path
+            mt_mgr = get_memory_trace_manager()
+            if mt_mgr and mt_mgr.enabled and memory_objs:
+                # Aggregate size if not computed
+                if tot_kv_size == 0:
+                    try:
+                        tot_kv_size = sum(mo.get_size() for mo in memory_objs)
+                    except Exception:
+                        pass
+                first_key = keys[0] if keys else None
+                req_id = getattr(first_key, "req_id", None) or getattr(
+                    first_key, "request_id", None
+                ) or "unknown"
+                address = id(memory_objs[0])
+                mt_mgr.record_kv_cache_offload(
+                    request_id=req_id,
+                    seq_id=0,
+                    address=address,
+                    size_bytes=tot_kv_size,
+                    chunk_size=getattr(self.config, "chunk_size", None),
+                    kv_dtype=str(self.metadata.kv_dtype),
+                    token_count=tot_token_num,
+                    extra={
+                        "engine": "v1",
+                        "num_chunks": len(memory_objs),
+                    },
+                )
+        except Exception:
+            pass
 
     @_lmcache_nvtx_annotate
     @torch.inference_mode()
@@ -340,7 +384,9 @@ class LMCacheEngine:
             num_to_store_tokens = torch.sum(mask).item()
         else:
             num_to_store_tokens = len(tokens)
-        monitor_req_id = self.stats_monitor.on_store_request(num_to_store_tokens)
+        monitor_req_id = self.stats_monitor.on_store_request(
+            num_to_store_tokens
+        )
 
         starts = []
         ends = []
@@ -394,12 +440,17 @@ class LMCacheEngine:
 
         if keys:
             # Transpose the keys and memory objects into layer major format
-            memory_objs = [list(row) for row in zip(*memory_objs, strict=False)]
+            memory_objs = [
+                list(row) for row in zip(*memory_objs, strict=False)
+            ]
             keys = [list(row) for row in zip(*keys, strict=False)]
 
             assert isinstance(
                 self.gpu_connector,
-                (VLLMPagedMemLayerwiseGPUConnector, VLLMBufferLayerwiseGPUConnector),
+                (
+                    VLLMPagedMemLayerwiseGPUConnector,
+                    VLLMBufferLayerwiseGPUConnector,
+                ),
             )
 
             mem_obj_generator = self.gpu_connector.batched_from_gpu(
@@ -411,7 +462,9 @@ class LMCacheEngine:
             for layer_id in range(self.num_layers):
                 yield
                 next(mem_obj_generator)
-                self.storage_manager.batched_put(keys[layer_id], memory_objs[layer_id])
+                self.storage_manager.batched_put(
+                    keys[layer_id], memory_objs[layer_id]
+                )
         else:
             # If no cache are found, we still need to yield to avoid
             # `StopIteration`
@@ -419,7 +472,9 @@ class LMCacheEngine:
                 yield
 
         self.stats_monitor.on_store_finished(monitor_req_id, tot_token_num)
-        logger.debug(f"Stored {tot_token_num} out of total {len(tokens)} tokens")
+        logger.debug(
+            f"Stored {tot_token_num} out of total {len(tokens)} tokens"
+        )
         yield
 
     @_lmcache_nvtx_annotate
@@ -458,7 +513,9 @@ class LMCacheEngine:
             num_required_tokens = torch.sum(mask).item()
         else:
             num_required_tokens = len(tokens)
-        monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens)
+        monitor_req_id = self.stats_monitor.on_retrieve_request(
+            num_required_tokens
+        )
 
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
 
@@ -495,15 +552,19 @@ class LMCacheEngine:
         onload_time = time.perf_counter() - t
 
         retrieved_tokens = torch.sum(ret_mask)
-        self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
+        self.stats_monitor.on_retrieve_finished(
+            monitor_req_id, retrieved_tokens
+        )
         logger.info(
             f"Retrieved {retrieved_tokens} "
             f"out of {num_required_tokens} "
             f"out of total {len(tokens)} tokens"
         )
         logger.debug(
-            "Retrieved %d out of total %d out of total %d tokens. size: %.4f gb,"
-            " cost %.4f ms, throughput: %.4f GB/s;",
+            (
+                "Retrieved %d out of total %d out of total %d tokens. size: %.4f gb,"  # noqa: E501
+                " cost %.4f ms, throughput: %.4f GB/s;"
+            ),
             retrieved_tokens,
             num_required_tokens,
             len(tokens),
@@ -511,6 +572,38 @@ class LMCacheEngine:
             onload_time * 1000,
             tot_kv_size / onload_time / 1024**3,
         )
+        # Memory trace: record hit event (aggregate per retrieve call)
+        try:
+            mt_mgr = get_memory_trace_manager()
+            if mt_mgr and mt_mgr.enabled and retrieved_tokens > 0:
+                first_key = (
+                    reordered_chunks[0][0]
+                    if len(reordered_chunks) > 0
+                    else None
+                )
+                req_id = getattr(first_key, "req_id", None) or getattr(
+                    first_key, "request_id", None
+                ) or "unknown"
+                address = (
+                    id(reordered_chunks[0][1])
+                    if len(reordered_chunks) > 0
+                    else 0
+                )
+                mt_mgr.record_kv_cache_hit(
+                    request_id=req_id,
+                    seq_id=0,
+                    address=address,
+                    size_bytes=tot_kv_size,
+                    chunk_size=getattr(self.config, "chunk_size", None),
+                    kv_dtype=str(self.metadata.kv_dtype),
+                    token_count=int(retrieved_tokens),
+                    extra={
+                        "engine": "v1",
+                        "num_chunks": len(reordered_chunks),
+                    },
+                )
+        except Exception:
+            pass
         return ret_mask
 
     @_lmcache_nvtx_annotate
@@ -548,7 +641,9 @@ class LMCacheEngine:
             num_required_tokens = torch.sum(mask).item()
         else:
             num_required_tokens = len(tokens)
-        monitor_req_id = self.stats_monitor.on_retrieve_request(num_required_tokens)
+        monitor_req_id = self.stats_monitor.on_retrieve_request(
+            num_required_tokens
+        )
 
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
 
@@ -582,7 +677,9 @@ class LMCacheEngine:
             # Transpose the keys into layer major format
             keys_layer_major = [list(row) for row in zip(*keys, strict=False)]
 
-            get_generator = self.storage_manager.layerwise_batched_get(keys_layer_major)
+            get_generator = self.storage_manager.layerwise_batched_get(
+                keys_layer_major
+            )
 
             assert isinstance(
                 self.gpu_connector,
@@ -591,7 +688,9 @@ class LMCacheEngine:
                     VLLMBufferLayerwiseGPUConnector,
                 ),
             )
-            mem_obj_consumer = self.gpu_connector.batched_to_gpu(starts, ends, **kwargs)
+            mem_obj_consumer = self.gpu_connector.batched_to_gpu(
+                starts, ends, **kwargs
+            )
             next(mem_obj_consumer)
 
             to_count_down = []
@@ -620,7 +719,9 @@ class LMCacheEngine:
         next(mem_obj_consumer)
 
         retrieved_tokens = torch.sum(ret_mask)
-        self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)
+        self.stats_monitor.on_retrieve_finished(
+            monitor_req_id, retrieved_tokens
+        )
         logger.debug(
             f"Retrieved {retrieved_tokens} "
             f"out of {num_required_tokens} "
@@ -682,7 +783,9 @@ class LMCacheEngine:
             prev_end = 0
 
             if pin:
-                assert lookup_id is not None, "lookup_id is required when pin is True"
+                assert lookup_id is not None, (
+                    "lookup_id is required when pin is True"
+                )
 
             # secondary lookup on p2p (via lookup_server) if enabled
             search_p2p = self.enable_p2p and (
