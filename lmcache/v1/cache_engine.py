@@ -646,6 +646,10 @@ class LMCacheEngine:
         )
 
         ret_mask = torch.zeros_like(tokens, dtype=torch.bool, device="cpu")
+        # For memory trace aggregation
+        tot_kv_size_layerwise = 0
+        first_mem_obj_address: Optional[int] = None
+        first_key_for_trace: Optional[CacheEngineKey] = None
 
         starts = []
         ends = []
@@ -676,6 +680,14 @@ class LMCacheEngine:
         if keys:
             # Transpose the keys into layer major format
             keys_layer_major = [list(row) for row in zip(*keys, strict=False)]
+            # For trace: pick the first key as
+            # the request identifier source
+            try:
+                first_key_for_trace = (
+                    keys_layer_major[0][0] if keys_layer_major else None
+                )
+            except Exception:
+                first_key_for_trace = None
 
             get_generator = self.storage_manager.layerwise_batched_get(
                 keys_layer_major
@@ -704,6 +716,14 @@ class LMCacheEngine:
                 mem_objs_layer = [task.result() for task in tasks]
                 mem_obj_consumer.send(mem_objs_layer)
                 to_count_down.extend(mem_objs_layer)
+                # Aggregate size for trace and capture first address
+                try:
+                    if first_mem_obj_address is None and mem_objs_layer:
+                        first_mem_obj_address = id(mem_objs_layer[0])
+                    for _mo in mem_objs_layer:
+                        tot_kv_size_layerwise += _mo.get_size()
+                except Exception:
+                    pass
 
             for mem_obj in to_count_down:
                 mem_obj.ref_count_down()
@@ -727,6 +747,39 @@ class LMCacheEngine:
             f"out of {num_required_tokens} "
             f"out of total {len(tokens)} tokens"
         )
+
+        # Memory trace: record hit event for layerwise path
+        try:
+            mt_mgr = get_memory_trace_manager()
+            if (
+                mt_mgr
+                and mt_mgr.enabled
+                and int(retrieved_tokens) > 0
+                and first_key_for_trace is not None
+            ):
+                req_id = (
+                    getattr(first_key_for_trace, "req_id", None)
+                    or getattr(first_key_for_trace, "request_id", None)
+                    or "unknown"
+                )
+                address = first_mem_obj_address or 0
+                mt_mgr.record_kv_cache_hit(
+                    request_id=req_id,
+                    seq_id=0,
+                    address=address,
+                    size_bytes=tot_kv_size_layerwise,
+                    chunk_size=getattr(self.config, "chunk_size", None),
+                    kv_dtype=str(self.metadata.kv_dtype),
+                    token_count=int(retrieved_tokens),
+                    extra={
+                        "engine": "v1",
+                        "layerwise": True,
+                        "num_layers": self.num_layers,
+                        "num_chunks": len(keys),
+                    },
+                )
+        except Exception:
+            pass
 
         yield ret_mask
 
