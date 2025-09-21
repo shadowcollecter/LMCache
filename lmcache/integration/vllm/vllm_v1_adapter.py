@@ -970,6 +970,7 @@ class LMCacheConnectorV1Impl:
                 offset=skip_leading_tokens,
                 transfer_spec=request.disagg_spec,
                 request_configs=request.request_configs,
+                request_id=request.req_id,
             )
 
             # NOTE(Jiayi): We assume all tokens are saved
